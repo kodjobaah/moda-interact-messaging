@@ -57,6 +57,9 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const rawBody = await request.text();
+  console.log("WhatsApp webhook received", {
+    rawBody,
+  });
 
   if (!verifyMetaSignature(request, rawBody)) {
     console.error("Invalid Meta webhook signature");
@@ -112,6 +115,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
   }
+
 
   return new Response("EVENT_RECEIVED", {
     status: 200,
