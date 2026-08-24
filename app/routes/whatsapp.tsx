@@ -1,31 +1,40 @@
 import crypto from "node:crypto";
+
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+
 import { getWhatsAppQueue } from "~/lib/queues/whatsapp.queue";
+
 import type {
   WhatsAppInboundEvent,
   WhatsAppMessageType,
 } from "~/lib/types/whatsapp";
 
-
-
 /**
  * Meta webhook verification.
+ *
+ * GET /webhook/whatsapp
  */
-export async function GET(request: Request) {
+export async function loader({ request }: LoaderFunctionArgs) {
   const { searchParams } = new URL(request.url);
 
   const mode = searchParams.get("hub.mode");
-
   const token = searchParams.get("hub.verify_token");
-
   const challenge = searchParams.get("hub.challenge");
 
   const verifyToken = getWhatsAppVerifyToken();
 
   if (mode === "subscribe" && token === verifyToken && challenge) {
+    console.log("WhatsApp webhook verified");
+
     return new Response(challenge, {
       status: 200,
+      headers: {
+        "Content-Type": "text/plain",
+      },
     });
   }
+
+  console.warn("WhatsApp webhook verification failed");
 
   return new Response("Forbidden", {
     status: 403,
@@ -34,8 +43,19 @@ export async function GET(request: Request) {
 
 /**
  * Actual WhatsApp webhook.
+ *
+ * POST /webhook/whatsapp
  */
-export async function POST(request: Request) {
+export async function action({ request }: ActionFunctionArgs) {
+  if (request.method !== "POST") {
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: {
+        Allow: "POST",
+      },
+    });
+  }
+
   const rawBody = await request.text();
 
   if (!verifyMetaSignature(request, rawBody)) {
@@ -46,7 +66,17 @@ export async function POST(request: Request) {
     });
   }
 
-  const payload = JSON.parse(rawBody);
+  let payload: any;
+
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    console.error("Invalid WhatsApp webhook JSON");
+
+    return new Response("Bad Request", {
+      status: 400,
+    });
+  }
 
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
@@ -55,7 +85,6 @@ export async function POST(request: Request) {
       }
 
       const value = change.value;
-
       const phoneNumberId = value.metadata?.phone_number_id;
 
       if (!phoneNumberId) {
@@ -96,8 +125,6 @@ async function handleInboundMessage({
   phoneNumberId: string;
   message: any;
 }) {
-  const text = message.type === "text" ? message.text?.body : null;
-
   const event: WhatsAppInboundEvent = {
     provider: "whatsapp",
 
@@ -116,9 +143,7 @@ async function handleInboundMessage({
 
   console.log("WhatsApp inbound message", {
     providerMessageId: event.providerMessageId,
-
     type: event.type,
-
     phoneNumberId: event.phoneNumberId,
   });
 
@@ -165,7 +190,6 @@ function verifyMetaSignature(request: Request, rawBody: string): boolean {
       .digest("hex");
 
   const received = Buffer.from(signature, "utf8");
-
   const expected = Buffer.from(expectedSignature, "utf8");
 
   if (received.length !== expected.length) {
@@ -185,7 +209,7 @@ function getMetaAppSecret(): string {
   return secret;
 }
 
-function createJobId(providerMessageId: string) {
+function createJobId(providerMessageId: string): string {
   return (
     "wa-" + crypto.createHash("sha256").update(providerMessageId).digest("hex")
   );
