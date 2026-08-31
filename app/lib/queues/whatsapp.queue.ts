@@ -1,6 +1,10 @@
 import { Queue } from "bullmq";
+import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { getRedis } from "../redis/redis";
 
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-interact-messaging",
+});
 
 let whatsappQueue: Queue | null = null;
 
@@ -13,6 +17,7 @@ export function getWhatsAppQueue() {
     "whatsapp-events",
     {
       connection: getRedis(),
+      telemetry: bullMQTelemetry,
 
       defaultJobOptions: {
         attempts: 3,

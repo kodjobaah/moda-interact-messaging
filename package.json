@@ -5,10 +5,13 @@
   "scripts": {
     "build": "react-router build",
     "dev": "react-router dev",
-    "start": "react-router-serve ./build/server/index.js",
+    "start": "node --import ./observability.mjs ./node_modules/@react-router/serve/bin.cjs ./build/server/index.js",
+    "test": "node --import tsx --test",
     "typecheck": "react-router typegen && tsc"
   },
   "dependencies": {
+    "@modainteract/moda-interact-shared": "0.4.0",
+    "@opentelemetry/api": "^1.9.1",
     "@react-router/node": "^8",
     "@react-router/serve": "^8",
     "bullmq": "^6.2.0",
@@ -16,15 +19,19 @@
     "isbot": "^5.1.36",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-router": "^8"
+    "react-router": "^8",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@react-router/dev": "^8",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^22",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "tailwindcss": "^4.2.2",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.3",
     "vite": "^8.0.3"
   }

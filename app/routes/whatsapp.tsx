@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
+import {
+  recordWhatsAppIngressTelemetry,
+  type WhatsAppIngressObservation,
+} from "~/lib/observability/whatsapp-ingress-telemetry";
 import { getWhatsAppQueue } from "~/lib/queues/whatsapp.queue";
 
 import type {
@@ -47,79 +51,119 @@ export async function loader({ request }: LoaderFunctionArgs) {
  * POST /webhook/whatsapp
  */
 export async function action({ request }: ActionFunctionArgs) {
-  if (request.method !== "POST") {
-    return new Response("Method Not Allowed", {
-      status: 405,
-      headers: {
-        Allow: "POST",
-      },
-    });
-  }
-
-  const rawBody = await request.text();
-  console.log("WhatsApp webhook received", {
-    rawBody,
-  });
-
-  if (!verifyMetaSignature(request, rawBody)) {
-    console.error("Invalid Meta webhook signature");
-
-    return new Response("Unauthorized", {
-      status: 401,
-    });
-  }
-
-  let payload: any;
+  const startedAt = performance.now();
 
   try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    console.error("Invalid WhatsApp webhook JSON");
+    if (request.method !== "POST") {
+      return observedResponse(
+        "Method Not Allowed",
+        {
+          status: 405,
+          headers: {
+            Allow: "POST",
+          },
+        },
+        startedAt,
+        { outcome: "rejected", reason: "method_not_allowed" },
+      );
+    }
 
-    return new Response("Bad Request", {
-      status: 400,
+    const rawBody = await request.text();
+    console.log("WhatsApp webhook received", {
+      rawBody,
     });
-  }
 
-  for (const entry of payload.entry ?? []) {
-    for (const change of entry.changes ?? []) {
-      if (change.field !== "messages") {
-        continue;
-      }
+    if (!verifyMetaSignature(request, rawBody)) {
+      console.error("Invalid Meta webhook signature");
 
-      const value = change.value;
-      const phoneNumberId = value.metadata?.phone_number_id;
+      return observedResponse(
+        "Unauthorized",
+        { status: 401 },
+        startedAt,
+        { outcome: "rejected", reason: "invalid_signature" },
+      );
+    }
 
-      if (!phoneNumberId) {
-        continue;
-      }
+    let payload: any;
 
-      /*
-       * Incoming customer messages
-       */
-      for (const message of value.messages ?? []) {
-        await handleInboundMessage({
-          phoneNumberId,
-          message,
-        });
-      }
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      console.error("Invalid WhatsApp webhook JSON");
 
-      /*
-       * Status updates for messages we previously sent
-       */
-      for (const status of value.statuses ?? []) {
-        console.log("WhatsApp message status", {
-          messageId: status.id,
-          status: status.status,
-        });
+      return observedResponse(
+        "Bad Request",
+        { status: 400 },
+        startedAt,
+        { outcome: "rejected", reason: "invalid_json" },
+      );
+    }
+
+    for (const entry of payload.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        if (change.field !== "messages") {
+          continue;
+        }
+
+        const value = change.value;
+        const phoneNumberId = value.metadata?.phone_number_id;
+
+        if (!phoneNumberId) {
+          continue;
+        }
+
+        /*
+         * Incoming customer messages
+         */
+        for (const message of value.messages ?? []) {
+          await handleInboundMessage({
+            phoneNumberId,
+            message,
+          });
+        }
+
+        /*
+         * Status updates for messages we previously sent
+         */
+        for (const status of value.statuses ?? []) {
+          console.log("WhatsApp message status", {
+            messageId: status.id,
+            status: status.status,
+          });
+        }
       }
     }
+
+    return observedResponse(
+      "EVENT_RECEIVED",
+      { status: 200 },
+      startedAt,
+      { outcome: "accepted", reason: "event_received" },
+    );
+  } catch (error) {
+    recordWhatsAppIngressTelemetry({
+      outcome: "failed",
+      reason: "processing_error",
+      statusCode: 500,
+      durationMs: performance.now() - startedAt,
+    });
+    throw error;
   }
+}
 
-
-  return new Response("EVENT_RECEIVED", {
-    status: 200,
+function observedResponse(
+  body: BodyInit,
+  init: ResponseInit & { status: WhatsAppIngressObservation["statusCode"] },
+  startedAt: number,
+  observation: Pick<WhatsAppIngressObservation, "outcome" | "reason">,
+): Response {
+  recordWhatsAppIngressTelemetry({
+    ...observation,
+    statusCode: init.status,
+    durationMs: performance.now() - startedAt,
   });
+
+  return new Response(body, init);
 }
 
 async function handleInboundMessage({
