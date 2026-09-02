@@ -59,6 +59,26 @@ BullMQ / Redis
 moda-interact-background
 ```
 
+## Health and readiness
+
+`GET /health` is a cheap process liveness check. It returns `200` with
+`{"status":"ok"}` and does not contact Redis or Meta.
+
+`GET /ready` performs a bounded Redis `PING`. It returns `200` with
+`{"status":"ready"}` when Redis is available, or `503` with
+`{"status":"unavailable"}` when the check fails or times out. Responses do
+not include credentials or connection details.
+
+`/health` and `/ready` use separate React Router route modules. Repository-level
+tests validate the readiness HTTP contract through an injectable Redis `PING`
+probe instead of connecting the long-lived ioredis/BullMQ client to a
+deliberately dead TCP endpoint. This prevents ioredis reconnect timers from
+keeping the Node test runner alive.
+
+Real Redis availability, outage and BullMQ integration behavior belong to the
+architecture/system-test layer, which owns an isolated ephemeral Redis
+container per test run.
+
 Keeping the webhook ingress separate from the worker means the HTTP request can be acknowledged quickly while slower work happens asynchronously.
 
 ## Repository structure
@@ -75,7 +95,9 @@ app/
 │       └── whatsapp.ts
 │
 ├── routes/
+│   ├── health.ts
 │   ├── home.tsx
+│   ├── ready.ts
 │   └── whatsapp.tsx
 │
 ├── root.tsx
@@ -312,7 +334,6 @@ The service is intentionally small today. Likely future additions include:
 - dead-letter/error handling
 - request tracing and structured logging
 - rate limiting and abuse protection
-- health/readiness endpoints
 
 The service should remain an ingress/egress boundary rather than becoming a second application backend.
 
