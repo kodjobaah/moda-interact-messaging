@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
 
+import {
+  safeParseNormalizedWhatsAppStatus,
+} from "@modainteract/moda-interact-shared";
+import type { NormalizedWhatsAppStatus } from "@modainteract/moda-interact-shared";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import {
@@ -69,9 +73,6 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const rawBody = await request.text();
-    console.log("WhatsApp webhook received", {
-      rawBody,
-    });
 
     if (!verifyMetaSignature(request, rawBody)) {
       console.error("Invalid Meta webhook signature");
@@ -126,9 +127,10 @@ export async function action({ request }: ActionFunctionArgs) {
          * Status updates for messages we previously sent
          */
         for (const status of value.statuses ?? []) {
-          console.log("WhatsApp message status", {
-            messageId: status.id,
-            status: status.status,
+          await handleProviderStatus({
+            entry,
+            change,
+            status,
           });
         }
       }
@@ -149,6 +151,118 @@ export async function action({ request }: ActionFunctionArgs) {
     });
     throw error;
   }
+}
+
+async function handleProviderStatus({
+  entry,
+  change,
+  status,
+}: {
+  entry?: unknown;
+  change?: unknown;
+  status: unknown;
+}) {
+  const normalized = normalizeProviderStatusFromWebhook({ entry, change, status });
+
+  if (!normalized) {
+    return;
+  }
+
+  const whatsappQueue = getWhatsAppQueue();
+  await whatsappQueue.add("message-status", normalized, {
+    jobId: createStatusJobId(normalized),
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 1000,
+    },
+  });
+}
+
+export function normalizeProviderStatusFromWebhook({
+  entry,
+  change,
+  status,
+}: {
+  entry?: unknown;
+  change?: unknown;
+  status: unknown;
+}): NormalizedWhatsAppStatus | null {
+  const entryRecord = asRecord(entry);
+  const changeRecord = asRecord(change);
+  const valueRecord = asRecord(changeRecord?.value);
+  const metadataRecord = asRecord(valueRecord?.metadata);
+
+  return normalizeProviderStatus({
+    entryId: entryRecord?.id,
+    phoneNumberId: metadataRecord?.phone_number_id,
+    status,
+  });
+}
+
+export function normalizeProviderStatus({
+  entryId,
+  phoneNumberId,
+  status,
+}: {
+  entryId?: unknown;
+  phoneNumberId?: unknown;
+  status: any;
+}): NormalizedWhatsAppStatus | null {
+  const providerAccountId = typeof entryId === "string" ? entryId.trim() : "";
+  const providerPhoneNumberId = typeof phoneNumberId === "string" ? phoneNumberId.trim() : "";
+  const providerMessageId = typeof status?.id === "string" ? status.id.trim() : "";
+  const normalizedStatus = normalizeProviderStatusName(status?.status);
+  const occurredAt = normalizeOccurredAt(status?.timestamp);
+
+  if (!providerAccountId || !providerPhoneNumberId || !providerMessageId || !normalizedStatus || !occurredAt) {
+    return null;
+  }
+
+  const candidate = {
+    schemaVersion: 2,
+    providerAccountId,
+    providerPhoneNumberId,
+    providerMessageId,
+    status: normalizedStatus,
+    occurredAt,
+    pricing: normalizePricing(status?.pricing),
+  };
+  if (!candidate.pricing) delete candidate.pricing;
+
+  const parsed = safeParseNormalizedWhatsAppStatus(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function normalizeProviderStatusName(value: unknown): NormalizedWhatsAppStatus["status"] | null {
+  switch (value) {
+    case "sent": return "SENT";
+    case "delivered": return "DELIVERED";
+    case "read": return "READ";
+    case "failed": return "FAILED";
+    default: return null;
+  }
+}
+
+function normalizeOccurredAt(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const numericValue = typeof value === "number" || /^\d+$/.test(value) ? Number(value) * 1000 : NaN;
+  const date = Number.isFinite(numericValue) ? new Date(numericValue) : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizePricing(value: unknown): NormalizedWhatsAppStatus["pricing"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const pricing = value as Record<string, unknown>;
+  const normalized: NonNullable<NormalizedWhatsAppStatus["pricing"]> = {};
+  if (typeof pricing.billable === "boolean") normalized.billable = pricing.billable;
+  if (typeof pricing.category === "string" && pricing.category.length <= 64) normalized.category = pricing.category;
+  if (typeof pricing.pricing_model === "string" && pricing.pricing_model.length <= 64) normalized.model = pricing.pricing_model;
+  return Object.keys(normalized).length ? normalized : undefined;
 }
 
 function observedResponse(
@@ -260,6 +374,14 @@ function getMetaAppSecret(): string {
 function createJobId(providerMessageId: string): string {
   return (
     "wa-" + crypto.createHash("sha256").update(providerMessageId).digest("hex")
+  );
+}
+
+export function createStatusJobId(event: NormalizedWhatsAppStatus): string {
+  return (
+    "ws-" + crypto.createHash("sha256")
+      .update(`${event.providerAccountId}:${event.providerPhoneNumberId}:${event.providerMessageId}:${event.status}`)
+      .digest("hex").slice(0, 61)
   );
 }
 

@@ -22,7 +22,7 @@ test("preloads the shared runtime before React Router with the messaging profile
   );
   assert.equal(
     packageJson.dependencies["@modainteract/moda-interact-shared"],
-    "0.6.2",
+    "0.7.4",
   );
   assert.match(
     observabilityPreload,
