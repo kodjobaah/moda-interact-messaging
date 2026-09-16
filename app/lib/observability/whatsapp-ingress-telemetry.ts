@@ -12,6 +12,7 @@ export const WHATSAPP_INGRESS_REASONS = [
   "method_not_allowed",
   "invalid_signature",
   "invalid_json",
+  "invalid_payload",
   "processing_error",
 ] as const;
 

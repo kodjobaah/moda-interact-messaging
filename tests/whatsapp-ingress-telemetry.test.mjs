@@ -108,6 +108,7 @@ test("uses only closed metric outcome and reason vocabularies", () => {
     "method_not_allowed",
     "invalid_signature",
     "invalid_json",
+    "invalid_payload",
     "processing_error",
   ]);
   assert.deepEqual(telemetry.WHATSAPP_INGRESS_STATUS_CODES, [

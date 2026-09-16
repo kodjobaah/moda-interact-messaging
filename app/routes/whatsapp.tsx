@@ -3,7 +3,13 @@ import crypto from "node:crypto";
 import {
   safeParseNormalizedWhatsAppStatus,
 } from "@modainteract/moda-interact-shared";
-import type { NormalizedWhatsAppStatus } from "@modainteract/moda-interact-shared";
+import type {
+  NormalizedWhatsAppStatus,
+} from "@modainteract/moda-interact-shared";
+import {
+  safeParseNormalizedWhatsAppInboundMessage,
+} from "@modainteract/moda-interact-shared/whatsapp";
+import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import {
@@ -11,11 +17,6 @@ import {
   type WhatsAppIngressObservation,
 } from "~/lib/observability/whatsapp-ingress-telemetry";
 import { getWhatsAppQueue } from "~/lib/queues/whatsapp.queue";
-
-import type {
-  WhatsAppInboundEvent,
-  WhatsAppMessageType,
-} from "~/lib/types/whatsapp";
 
 /**
  * Meta webhook verification.
@@ -107,20 +108,26 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const value = change.value;
-        const phoneNumberId = value.metadata?.phone_number_id;
-
-        if (!phoneNumberId) {
-          continue;
-        }
-
         /*
          * Incoming customer messages
          */
         for (const message of value.messages ?? []) {
-          await handleInboundMessage({
-            phoneNumberId,
+          const normalized = normalizeInboundMessageFromWebhook({
+            entry,
+            change,
             message,
           });
+
+          if (!normalized) {
+            return observedResponse(
+              "Bad Request",
+              { status: 400 },
+              startedAt,
+              { outcome: "rejected", reason: "invalid_payload" },
+            );
+          }
+
+          await enqueueInboundMessage(normalized);
         }
 
         /*
@@ -280,33 +287,71 @@ function observedResponse(
   return new Response(body, init);
 }
 
-async function handleInboundMessage({
-  phoneNumberId,
+export function normalizeInboundMessageFromWebhook({
+  entry,
+  change,
   message,
 }: {
-  phoneNumberId: string;
-  message: any;
-}) {
-  const event: WhatsAppInboundEvent = {
+  entry?: unknown;
+  change?: unknown;
+  message: unknown;
+}): NormalizedWhatsAppInboundMessage | null {
+  const entryRecord = asRecord(entry);
+  const changeRecord = asRecord(change);
+  const valueRecord = asRecord(changeRecord?.value);
+  const metadataRecord = asRecord(valueRecord?.metadata);
+  const messageRecord = asRecord(message);
+  const audioRecord = asRecord(messageRecord?.audio);
+  const contextRecord = asRecord(messageRecord?.context);
+  const messageType = typeof messageRecord?.type === "string"
+    ? messageRecord.type.trim()
+    : "unknown";
+
+  const content = messageType === "text"
+    ? {
+        type: "text" as const,
+        text: asRecord(messageRecord?.text)?.body,
+      }
+    : messageType === "audio"
+      ? {
+          type: "audio" as const,
+          mediaId: audioRecord?.id,
+          mimeType: typeof audioRecord?.mime_type === "string"
+            ? audioRecord.mime_type
+            : null,
+          sha256: typeof audioRecord?.sha256 === "string"
+            ? audioRecord.sha256
+            : null,
+          voice: typeof audioRecord?.voice === "boolean"
+            ? audioRecord.voice
+            : null,
+        }
+      : {
+          type: "unsupported" as const,
+          providerType: messageType,
+        };
+
+  const result = safeParseNormalizedWhatsAppInboundMessage({
+    schemaVersion: 1,
     provider: "whatsapp",
+    providerAccountId: entryRecord?.id,
+    providerPhoneNumberId: metadataRecord?.phone_number_id,
+    providerMessageId: messageRecord?.id,
+    customerPhone: messageRecord?.from,
+    contextMessageId: contextRecord ? contextRecord.id : null,
+    occurredAt: normalizeOccurredAt(messageRecord?.timestamp),
+    content,
+  });
 
-    providerMessageId: message.id,
+  return result.success ? result.data : null;
+}
 
-    phoneNumberId,
-
-    customerAddress: message.from,
-
-    timestamp: Number(message.timestamp),
-
-    type: normalizeMessageType(message.type),
-
-    text: message.type === "text" ? (message.text?.body ?? null) : null,
-  };
+async function enqueueInboundMessage(event: NormalizedWhatsAppInboundMessage) {
 
   console.log("WhatsApp inbound message", {
     providerMessageId: event.providerMessageId,
-    type: event.type,
-    phoneNumberId: event.phoneNumberId,
+    type: event.content.type,
+    providerPhoneNumberId: event.providerPhoneNumberId,
   });
 
   const jobId = createJobId(event.providerMessageId);
@@ -324,7 +369,6 @@ async function handleInboundMessage({
     },
   });
 }
-
 function getWhatsAppVerifyToken(): string {
   const token = process.env.WHATSAPP_VERIFY_TOKEN;
 
@@ -371,7 +415,7 @@ function getMetaAppSecret(): string {
   return secret;
 }
 
-function createJobId(providerMessageId: string): string {
+export function createJobId(providerMessageId: string): string {
   return (
     "wa-" + crypto.createHash("sha256").update(providerMessageId).digest("hex")
   );
@@ -383,18 +427,4 @@ export function createStatusJobId(event: NormalizedWhatsAppStatus): string {
       .update(`${event.providerAccountId}:${event.providerPhoneNumberId}:${event.providerMessageId}:${event.status}`)
       .digest("hex").slice(0, 61)
   );
-}
-
-function normalizeMessageType(type: string): WhatsAppMessageType {
-  switch (type) {
-    case "text":
-    case "image":
-    case "audio":
-    case "document":
-    case "interactive":
-      return type;
-
-    default:
-      return "unknown";
-  }
 }
