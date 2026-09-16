@@ -151,6 +151,7 @@ function createMetaPayload(messageId) {
   return {
     entry: [
       {
+        id: "waba-id",
         changes: [
           {
             field: "messages",
@@ -192,13 +193,15 @@ function expectedEvent(payload) {
   const message = value.messages[0];
 
   return {
+    schemaVersion: 1,
     provider: "whatsapp",
+    providerAccountId: "waba-id",
+    providerPhoneNumberId: value.metadata.phone_number_id,
     providerMessageId: message.id,
-    phoneNumberId: value.metadata.phone_number_id,
-    customerAddress: message.from,
-    timestamp: Number(message.timestamp),
-    type: "text",
-    text: message.text.body,
+    customerPhone: message.from,
+    contextMessageId: null,
+    occurredAt: "2026-08-31T02:40:00.000Z",
+    content: { type: "text", text: message.text.body },
   };
 }
 
