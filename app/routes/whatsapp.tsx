@@ -254,7 +254,10 @@ function normalizeFailureEvidence(errors: unknown): { failure?: { providerCode: 
     const code = errorRecord?.code;
 
     if (typeof code === "number" && Number.isFinite(code) && Number.isInteger(code)) {
-      return { failure: { providerCode: BigInt(code).toString(10) } };
+      const providerCode = BigInt(code).toString(10);
+      if (providerCode.length <= 64) {
+        return { failure: { providerCode } };
+      }
     }
 
     if (typeof code === "string") {

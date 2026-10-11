@@ -133,6 +133,38 @@ test("normalizes finite integer provider failure codes to decimal text", () => {
   assert.equal("title" in (event ?? {}), false);
 });
 
+test("omits an over-bound numeric provider code without dropping FAILED status", () => {
+  const event = normalizeProviderStatus({
+    ...base,
+    status: {
+      id: "wamid-failed-large-numeric",
+      status: "failed",
+      timestamp: "1788144000",
+      errors: [{ code: 1e100 }],
+    },
+  });
+
+  assert.equal(event?.schemaVersion, 3);
+  assert.equal(event?.status, "FAILED");
+  assert.equal("failure" in (event ?? {}), false);
+});
+
+test("continues to later valid evidence after an over-bound numeric provider code", () => {
+  const event = normalizeProviderStatus({
+    ...base,
+    status: {
+      id: "wamid-failed-large-numeric-then-valid",
+      status: "failed",
+      timestamp: "1788144000",
+      errors: [{ code: 1e100 }, { code: "provider-42" }],
+    },
+  });
+
+  assert.equal(event?.schemaVersion, 3);
+  assert.equal(event?.status, "FAILED");
+  assert.deepEqual(event?.failure, { providerCode: "provider-42" });
+});
+
 test("trims bounded string failure codes and selects the first valid entry", () => {
   const event = normalizeProviderStatus({
     ...base,
