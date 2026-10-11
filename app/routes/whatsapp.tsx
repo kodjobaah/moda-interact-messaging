@@ -4,10 +4,8 @@ import {
   recordWhatsAppIngressTelemetry,
   type WhatsAppIngressObservation,
 } from "~/lib/observability/whatsapp-ingress-telemetry";
-import { normalizeInboundMessageFromWebhook } from "~/lib/whatsapp/inbound-message-normalizer";
-import { normalizeProviderStatusFromWebhook } from "~/lib/whatsapp/provider-status-normalizer";
+import { dispatchWhatsAppWebhook } from "~/lib/whatsapp/webhook-dispatch.server";
 import { getWhatsAppVerifyToken, verifyMetaSignature } from "~/lib/whatsapp/webhook-auth.server";
-import { enqueueInboundMessage, enqueueProviderStatus } from "~/lib/whatsapp/whatsapp-job-publisher.server";
 
 /**
  * Meta webhook verification.
@@ -46,7 +44,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
  *
  * POST /webhook/whatsapp
  */
-export async function action({ request }: ActionFunctionArgs) {
+// The optional dispatcher is a test seam. React Router supplies only its normal
+// action arguments, so production always uses the existing event dispatcher.
+export async function action(
+  { request }: ActionFunctionArgs,
+  dispatch: typeof dispatchWhatsAppWebhook = dispatchWhatsAppWebhook,
+): Promise<Response> {
   const startedAt = performance.now();
 
   try {
@@ -92,46 +95,14 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    for (const entry of payload.entry ?? []) {
-      for (const change of entry.changes ?? []) {
-        if (change.field !== "messages") {
-          continue;
-        }
-
-        const value = change.value;
-        /*
-         * Incoming customer messages
-         */
-        for (const message of value.messages ?? []) {
-          const normalized = normalizeInboundMessageFromWebhook({
-            entry,
-            change,
-            message,
-          });
-
-          if (!normalized) {
-            return observedResponse(
-              "Bad Request",
-              { status: 400 },
-              startedAt,
-              { outcome: "rejected", reason: "invalid_payload" },
-            );
-          }
-
-          await enqueueInboundMessage(normalized);
-        }
-
-        /*
-         * Status updates for messages we previously sent
-         */
-        for (const status of value.statuses ?? []) {
-          await handleProviderStatus({
-            entry,
-            change,
-            status,
-          });
-        }
-      }
+    const outcome = await dispatch(payload);
+    if (outcome === "invalid_payload") {
+      return observedResponse(
+        "Bad Request",
+        { status: 400 },
+        startedAt,
+        { outcome: "rejected", reason: "invalid_payload" },
+      );
     }
 
     return observedResponse(
@@ -149,24 +120,6 @@ export async function action({ request }: ActionFunctionArgs) {
     });
     throw error;
   }
-}
-
-async function handleProviderStatus({
-  entry,
-  change,
-  status,
-}: {
-  entry?: unknown;
-  change?: unknown;
-  status: unknown;
-}) {
-  const normalized = normalizeProviderStatusFromWebhook({ entry, change, status });
-
-  if (!normalized) {
-    return;
-  }
-
-  await enqueueProviderStatus(normalized);
 }
 
 function observedResponse(
