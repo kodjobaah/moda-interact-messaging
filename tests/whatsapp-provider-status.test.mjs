@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 
-const { createStatusJobId } = await import("../app/routes/whatsapp.tsx");
+const { createStatusJobId } = await import("../app/lib/whatsapp/job-identity.server.ts");
 const {
   normalizeProviderStatus,
   normalizeProviderStatusFromWebhook,
