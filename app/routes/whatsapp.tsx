@@ -2,10 +2,11 @@ import crypto from "node:crypto";
 
 import {
   safeParseNormalizedWhatsAppStatus,
-} from "@modainteract/moda-interact-shared";
+  WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION,
+} from "@modainteract/moda-interact-shared/billing";
 import type {
   NormalizedWhatsAppStatus,
-} from "@modainteract/moda-interact-shared";
+} from "@modainteract/moda-interact-shared/billing";
 import {
   safeParseNormalizedWhatsAppInboundMessage,
 } from "@modainteract/moda-interact-shared/whatsapp";
@@ -214,31 +215,60 @@ export function normalizeProviderStatus({
 }: {
   entryId?: unknown;
   phoneNumberId?: unknown;
-  status: any;
+  status: unknown;
 }): NormalizedWhatsAppStatus | null {
+  const statusRecord = asRecord(status);
   const providerAccountId = typeof entryId === "string" ? entryId.trim() : "";
   const providerPhoneNumberId = typeof phoneNumberId === "string" ? phoneNumberId.trim() : "";
-  const providerMessageId = typeof status?.id === "string" ? status.id.trim() : "";
-  const normalizedStatus = normalizeProviderStatusName(status?.status);
-  const occurredAt = normalizeOccurredAt(status?.timestamp);
+  const providerMessageId = typeof statusRecord?.id === "string" ? statusRecord.id.trim() : "";
+  const normalizedStatus = normalizeProviderStatusName(statusRecord?.status);
+  const occurredAt = normalizeOccurredAt(statusRecord?.timestamp);
 
   if (!providerAccountId || !providerPhoneNumberId || !providerMessageId || !normalizedStatus || !occurredAt) {
     return null;
   }
 
   const candidate = {
-    schemaVersion: 2,
+    schemaVersion: WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION,
     providerAccountId,
     providerPhoneNumberId,
     providerMessageId,
     status: normalizedStatus,
     occurredAt,
-    pricing: normalizePricing(status?.pricing),
+    pricing: normalizePricing(statusRecord?.pricing),
+    ...(normalizedStatus === "FAILED"
+      ? normalizeFailureEvidence(statusRecord?.errors)
+      : {}),
   };
   if (!candidate.pricing) delete candidate.pricing;
 
   const parsed = safeParseNormalizedWhatsAppStatus(candidate);
   return parsed.success ? parsed.data : null;
+}
+
+function normalizeFailureEvidence(errors: unknown): { failure?: { providerCode: string } } {
+  if (!Array.isArray(errors)) return {};
+
+  for (const error of errors) {
+    const errorRecord = asRecord(error);
+    const code = errorRecord?.code;
+
+    if (typeof code === "number" && Number.isFinite(code) && Number.isInteger(code)) {
+      const providerCode = BigInt(code).toString(10);
+      if (providerCode.length <= 64) {
+        return { failure: { providerCode } };
+      }
+    }
+
+    if (typeof code === "string") {
+      const providerCode = code.trim();
+      if (providerCode.length > 0 && providerCode.length <= 64) {
+        return { failure: { providerCode } };
+      }
+    }
+  }
+
+  return {};
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -422,9 +452,15 @@ export function createJobId(providerMessageId: string): string {
 }
 
 export function createStatusJobId(event: NormalizedWhatsAppStatus): string {
+  const identity = `${event.providerAccountId}:${event.providerPhoneNumberId}:${event.providerMessageId}:${event.status}`;
+  const failureEvidence = event.schemaVersion === WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION
+    && event.status === "FAILED"
+    ? event.failure?.providerCode
+    : undefined;
+
   return (
     "ws-" + crypto.createHash("sha256")
-      .update(`${event.providerAccountId}:${event.providerPhoneNumberId}:${event.providerMessageId}:${event.status}`)
+      .update(failureEvidence ? `${identity}:failure:${failureEvidence}` : identity)
       .digest("hex").slice(0, 61)
   );
 }
