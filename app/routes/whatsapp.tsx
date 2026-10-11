@@ -1,15 +1,9 @@
 import crypto from "node:crypto";
 
-import {
-  safeParseNormalizedWhatsAppStatus,
-  WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION,
-} from "@modainteract/moda-interact-shared/billing";
+import { WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION } from "@modainteract/moda-interact-shared/billing";
 import type {
   NormalizedWhatsAppStatus,
 } from "@modainteract/moda-interact-shared/billing";
-import {
-  safeParseNormalizedWhatsAppInboundMessage,
-} from "@modainteract/moda-interact-shared/whatsapp";
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
@@ -18,6 +12,9 @@ import {
   type WhatsAppIngressObservation,
 } from "~/lib/observability/whatsapp-ingress-telemetry";
 import { getWhatsAppQueue } from "~/lib/queues/whatsapp.queue";
+import { normalizeInboundMessageFromWebhook } from "~/lib/whatsapp/inbound-message-normalizer";
+import { normalizeProviderStatusFromWebhook } from "~/lib/whatsapp/provider-status-normalizer";
+import { getWhatsAppVerifyToken, verifyMetaSignature } from "~/lib/whatsapp/webhook-auth.server";
 
 /**
  * Meta webhook verification.
@@ -187,121 +184,6 @@ async function handleProviderStatus({
   });
 }
 
-export function normalizeProviderStatusFromWebhook({
-  entry,
-  change,
-  status,
-}: {
-  entry?: unknown;
-  change?: unknown;
-  status: unknown;
-}): NormalizedWhatsAppStatus | null {
-  const entryRecord = asRecord(entry);
-  const changeRecord = asRecord(change);
-  const valueRecord = asRecord(changeRecord?.value);
-  const metadataRecord = asRecord(valueRecord?.metadata);
-
-  return normalizeProviderStatus({
-    entryId: entryRecord?.id,
-    phoneNumberId: metadataRecord?.phone_number_id,
-    status,
-  });
-}
-
-export function normalizeProviderStatus({
-  entryId,
-  phoneNumberId,
-  status,
-}: {
-  entryId?: unknown;
-  phoneNumberId?: unknown;
-  status: unknown;
-}): NormalizedWhatsAppStatus | null {
-  const statusRecord = asRecord(status);
-  const providerAccountId = typeof entryId === "string" ? entryId.trim() : "";
-  const providerPhoneNumberId = typeof phoneNumberId === "string" ? phoneNumberId.trim() : "";
-  const providerMessageId = typeof statusRecord?.id === "string" ? statusRecord.id.trim() : "";
-  const normalizedStatus = normalizeProviderStatusName(statusRecord?.status);
-  const occurredAt = normalizeOccurredAt(statusRecord?.timestamp);
-
-  if (!providerAccountId || !providerPhoneNumberId || !providerMessageId || !normalizedStatus || !occurredAt) {
-    return null;
-  }
-
-  const candidate = {
-    schemaVersion: WHATSAPP_PROVIDER_STATUS_SCHEMA_VERSION,
-    providerAccountId,
-    providerPhoneNumberId,
-    providerMessageId,
-    status: normalizedStatus,
-    occurredAt,
-    pricing: normalizePricing(statusRecord?.pricing),
-    ...(normalizedStatus === "FAILED"
-      ? normalizeFailureEvidence(statusRecord?.errors)
-      : {}),
-  };
-  if (!candidate.pricing) delete candidate.pricing;
-
-  const parsed = safeParseNormalizedWhatsAppStatus(candidate);
-  return parsed.success ? parsed.data : null;
-}
-
-function normalizeFailureEvidence(errors: unknown): { failure?: { providerCode: string } } {
-  if (!Array.isArray(errors)) return {};
-
-  for (const error of errors) {
-    const errorRecord = asRecord(error);
-    const code = errorRecord?.code;
-
-    if (typeof code === "number" && Number.isFinite(code) && Number.isInteger(code)) {
-      const providerCode = BigInt(code).toString(10);
-      if (providerCode.length <= 64) {
-        return { failure: { providerCode } };
-      }
-    }
-
-    if (typeof code === "string") {
-      const providerCode = code.trim();
-      if (providerCode.length > 0 && providerCode.length <= 64) {
-        return { failure: { providerCode } };
-      }
-    }
-  }
-
-  return {};
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? value as Record<string, unknown> : null;
-}
-
-function normalizeProviderStatusName(value: unknown): NormalizedWhatsAppStatus["status"] | null {
-  switch (value) {
-    case "sent": return "SENT";
-    case "delivered": return "DELIVERED";
-    case "read": return "READ";
-    case "failed": return "FAILED";
-    default: return null;
-  }
-}
-
-function normalizeOccurredAt(value: unknown): string | null {
-  if (typeof value !== "string" && typeof value !== "number") return null;
-  const numericValue = typeof value === "number" || /^\d+$/.test(value) ? Number(value) * 1000 : NaN;
-  const date = Number.isFinite(numericValue) ? new Date(numericValue) : new Date(String(value));
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-function normalizePricing(value: unknown): NormalizedWhatsAppStatus["pricing"] | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const pricing = value as Record<string, unknown>;
-  const normalized: NonNullable<NormalizedWhatsAppStatus["pricing"]> = {};
-  if (typeof pricing.billable === "boolean") normalized.billable = pricing.billable;
-  if (typeof pricing.category === "string" && pricing.category.length <= 64) normalized.category = pricing.category;
-  if (typeof pricing.pricing_model === "string" && pricing.pricing_model.length <= 64) normalized.model = pricing.pricing_model;
-  return Object.keys(normalized).length ? normalized : undefined;
-}
-
 function observedResponse(
   body: BodyInit,
   init: ResponseInit & { status: WhatsAppIngressObservation["statusCode"] },
@@ -315,65 +197,6 @@ function observedResponse(
   });
 
   return new Response(body, init);
-}
-
-export function normalizeInboundMessageFromWebhook({
-  entry,
-  change,
-  message,
-}: {
-  entry?: unknown;
-  change?: unknown;
-  message: unknown;
-}): NormalizedWhatsAppInboundMessage | null {
-  const entryRecord = asRecord(entry);
-  const changeRecord = asRecord(change);
-  const valueRecord = asRecord(changeRecord?.value);
-  const metadataRecord = asRecord(valueRecord?.metadata);
-  const messageRecord = asRecord(message);
-  const audioRecord = asRecord(messageRecord?.audio);
-  const contextRecord = asRecord(messageRecord?.context);
-  const messageType = typeof messageRecord?.type === "string"
-    ? messageRecord.type.trim()
-    : "unknown";
-
-  const content = messageType === "text"
-    ? {
-        type: "text" as const,
-        text: asRecord(messageRecord?.text)?.body,
-      }
-    : messageType === "audio"
-      ? {
-          type: "audio" as const,
-          mediaId: audioRecord?.id,
-          mimeType: typeof audioRecord?.mime_type === "string"
-            ? audioRecord.mime_type
-            : null,
-          sha256: typeof audioRecord?.sha256 === "string"
-            ? audioRecord.sha256
-            : null,
-          voice: typeof audioRecord?.voice === "boolean"
-            ? audioRecord.voice
-            : null,
-        }
-      : {
-          type: "unsupported" as const,
-          providerType: messageType,
-        };
-
-  const result = safeParseNormalizedWhatsAppInboundMessage({
-    schemaVersion: 1,
-    provider: "whatsapp",
-    providerAccountId: entryRecord?.id,
-    providerPhoneNumberId: metadataRecord?.phone_number_id,
-    providerMessageId: messageRecord?.id,
-    customerPhone: messageRecord?.from,
-    contextMessageId: contextRecord ? contextRecord.id : null,
-    occurredAt: normalizeOccurredAt(messageRecord?.timestamp),
-    content,
-  });
-
-  return result.success ? result.data : null;
 }
 
 async function enqueueInboundMessage(event: NormalizedWhatsAppInboundMessage) {
@@ -399,52 +222,6 @@ async function enqueueInboundMessage(event: NormalizedWhatsAppInboundMessage) {
     },
   });
 }
-function getWhatsAppVerifyToken(): string {
-  const token = process.env.WHATSAPP_VERIFY_TOKEN;
-
-  if (!token) {
-    throw new Error("WHATSAPP_VERIFY_TOKEN is required");
-  }
-
-  return token;
-}
-
-function verifyMetaSignature(request: Request, rawBody: string): boolean {
-  const signature = request.headers.get("x-hub-signature-256");
-
-  if (!signature) {
-    return false;
-  }
-
-  const appSecret = getMetaAppSecret();
-
-  const expectedSignature =
-    "sha256=" +
-    crypto
-      .createHmac("sha256", appSecret)
-      .update(rawBody, "utf8")
-      .digest("hex");
-
-  const received = Buffer.from(signature, "utf8");
-  const expected = Buffer.from(expectedSignature, "utf8");
-
-  if (received.length !== expected.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(received, expected);
-}
-
-function getMetaAppSecret(): string {
-  const secret = process.env.META_APP_SECRET;
-
-  if (!secret) {
-    throw new Error("META_APP_SECRET is required");
-  }
-
-  return secret;
-}
-
 export function createJobId(providerMessageId: string): string {
   return (
     "wa-" + crypto.createHash("sha256").update(providerMessageId).digest("hex")

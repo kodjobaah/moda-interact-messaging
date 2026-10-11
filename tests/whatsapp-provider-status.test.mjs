@@ -2,13 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 
+const { createStatusJobId } = await import("../app/routes/whatsapp.tsx");
 const {
-  createStatusJobId,
   normalizeProviderStatus,
   normalizeProviderStatusFromWebhook,
-} = await import(
-  "../app/routes/whatsapp.tsx"
-);
+} = await import("../app/lib/whatsapp/provider-status-normalizer.ts");
 
 const base = {
   entryId: "waba-1",

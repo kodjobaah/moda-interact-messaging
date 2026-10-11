@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const {
-  createJobId,
-  normalizeInboundMessageFromWebhook,
-} = await import("../app/routes/whatsapp.tsx");
+const { createJobId } = await import("../app/routes/whatsapp.tsx");
+const { normalizeInboundMessageFromWebhook } = await import(
+  "../app/lib/whatsapp/inbound-message-normalizer.ts"
+);
 
 const entry = { id: "waba-123" };
 const change = {
