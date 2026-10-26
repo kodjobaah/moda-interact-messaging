@@ -103,11 +103,11 @@ test("silently skips malformed statuses and ignores unrelated changes", async ()
   assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "accepted");
   assert.deepEqual(observed.map(({ event }) => event.providerMessageId), ["out-valid"]);
   assert.equal(await dispatchWhatsAppWebhook({ entry: [] }, publishers), "accepted");
-  assert.equal(await dispatchWhatsAppWebhook({}, publishers), "accepted");
+  assert.equal(await dispatchWhatsAppWebhook({}, publishers), "invalid_payload");
   assert.equal(observed.length, 1);
 });
 
-test("retains partial publication on a late invalid inbound message (MESSAGING-005 follow-up)", async () => {
+test("rejects a late invalid inbound before publishing any events", async () => {
   const { observed, publishers } = fakePublishers();
   const payload = {
     entry: [{
@@ -120,7 +120,7 @@ test("retains partial publication on a late invalid inbound message (MESSAGING-0
   };
 
   assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "invalid_payload");
-  assert.deepEqual(observed.map(({ event }) => event.providerMessageId), ["in-1", "out-1"]);
+  assert.deepEqual(observed, []);
 });
 
 test("propagates publisher errors and never advances past a failed job", async () => {
@@ -143,9 +143,9 @@ test("propagates publisher errors and never advances past a failed job", async (
   assert.deepEqual(observed, ["in-1"]);
 });
 
-test("retains historical errors on non-array/invalid envelope shapes for MESSAGING-005", async () => {
+test("returns invalid_payload for malformed signed envelopes", async () => {
   const { publishers } = fakePublishers();
-  await assert.rejects(dispatchWhatsAppWebhook({ entry: 42 }, publishers), TypeError);
-  await assert.rejects(dispatchWhatsAppWebhook(null, publishers), TypeError);
-  await assert.rejects(dispatchWhatsAppWebhook({ entry: [{ changes: [{ field: "messages", value: null }] }] }, publishers), TypeError);
+  assert.equal(await dispatchWhatsAppWebhook({ entry: 42 }, publishers), "invalid_payload");
+  assert.equal(await dispatchWhatsAppWebhook(null, publishers), "invalid_payload");
+  assert.equal(await dispatchWhatsAppWebhook({ entry: [{ changes: [{ field: "messages", value: null }] }] }, publishers), "invalid_payload");
 });

@@ -1,4 +1,5 @@
 import { Queue } from "bullmq";
+import { META_TEMPLATE_STATUS_QUEUE } from "@modainteract/moda-interact-shared/whatsapp-template-events";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { getRedis } from "../redis/redis";
 
@@ -14,7 +15,7 @@ export function getWhatsAppQueue() {
   }
 
   whatsappQueue = new Queue(
-    "whatsapp-events",
+    META_TEMPLATE_STATUS_QUEUE,
     {
       connection: getRedis(),
       telemetry: bullMQTelemetry,
