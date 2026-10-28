@@ -15,6 +15,10 @@ import {
   type MetaWebhookCredentialsReader,
 } from "~/lib/platform-configuration/meta-contract.server";
 import { getProductionMetaWebhookCredentialsReader } from "~/lib/platform-configuration/meta-production.server";
+import {
+  getMessagingWebhookLogger,
+  type MessagingWebhookLogger,
+} from "~/lib/observability/messaging-webhook-logger.server";
 
 /**
  * Meta webhook verification.
@@ -71,8 +75,10 @@ export async function action(
   { request }: ActionFunctionArgs,
   dispatch: typeof dispatchWhatsAppWebhook = dispatchWhatsAppWebhook,
   injectedReader?: MetaWebhookCredentialsReader,
+  injectedLogger?: MessagingWebhookLogger,
 ): Promise<Response> {
   const startedAt = performance.now();
+  const logger = injectedLogger ?? getMessagingWebhookLogger();
 
   try {
     if (request.method !== "POST") {
@@ -86,6 +92,7 @@ export async function action(
         },
         startedAt,
         { outcome: "rejected", reason: "method_not_allowed" },
+        logger,
       );
     }
 
@@ -97,6 +104,7 @@ export async function action(
         { status: 401 },
         startedAt,
         { outcome: "rejected", reason: "invalid_signature" },
+        logger,
       );
     }
 
@@ -111,6 +119,7 @@ export async function action(
           { status: 503 },
           startedAt,
           { outcome: "failed", reason: "configuration_unavailable" },
+          logger,
         );
       }
       throw error;
@@ -122,6 +131,7 @@ export async function action(
         { status: 401 },
         startedAt,
         { outcome: "rejected", reason: "invalid_signature" },
+        logger,
       );
     }
 
@@ -130,13 +140,12 @@ export async function action(
     try {
       payload = JSON.parse(rawBody);
     } catch {
-      console.error("Invalid WhatsApp webhook JSON");
-
       return observedResponse(
         "Bad Request",
         { status: 400 },
         startedAt,
         { outcome: "rejected", reason: "invalid_json" },
+        logger,
       );
     }
 
@@ -147,6 +156,7 @@ export async function action(
         { status: 400 },
         startedAt,
         { outcome: "rejected", reason: "invalid_payload" },
+        logger,
       );
     }
 
@@ -155,8 +165,13 @@ export async function action(
       { status: 200 },
       startedAt,
       { outcome: "accepted", reason: "event_received" },
+      logger,
     );
   } catch (error) {
+    logger.error("messaging.webhook.request_failed", {
+      reasonCode: "PROCESSING_ERROR",
+      statusCode: 500,
+    });
     recordWhatsAppIngressTelemetry({
       outcome: "failed",
       reason: "processing_error",
@@ -172,7 +187,14 @@ function observedResponse(
   init: ResponseInit & { status: WhatsAppIngressObservation["statusCode"] },
   startedAt: number,
   observation: Pick<WhatsAppIngressObservation, "outcome" | "reason">,
+  logger: MessagingWebhookLogger,
 ): Response {
+  if (init.status >= 400) {
+    logger.warn("messaging.webhook.request_rejected", {
+      reasonCode: observation.reason,
+      statusCode: init.status,
+    });
+  }
   recordWhatsAppIngressTelemetry({
     ...observation,
     statusCode: init.status,

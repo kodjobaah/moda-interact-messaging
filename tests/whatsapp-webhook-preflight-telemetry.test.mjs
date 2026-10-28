@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import { metrics } from "@opentelemetry/api";
+import {
+  createMetaCredentialsReader,
+  META_CREDENTIALS,
+} from "./helpers/meta-credentials.mjs";
 
 const observations = [];
 metrics.setGlobalMeterProvider({
@@ -20,7 +24,7 @@ metrics.setGlobalMeterProvider({
 // Load after installing the test meter: verify the real route-to-telemetry path.
 const { action } = await import("../app/routes/whatsapp.tsx");
 
-const secret = "arch034-preflight-telemetry-test";
+const secret = META_CREDENTIALS.appSecret;
 const endpoint = "https://messaging.example/webhook/whatsapp";
 
 function signedRequest(body) {
@@ -33,19 +37,20 @@ function signedRequest(body) {
 }
 
 test("invalid signed envelope produces bounded invalid_payload telemetry", async () => {
-  const previous = process.env.META_APP_SECRET;
-  process.env.META_APP_SECRET = secret;
-  try {
-    const response = await action({ request: signedRequest('{"entry":[null]}') });
-    assert.equal(response.status, 400);
-    assert.equal(await response.text(), "Bad Request");
-    assert.deepEqual(observations.at(-1), {
-      "messaging.ingress.outcome": "rejected",
-      "messaging.ingress.reason": "invalid_payload",
-      "messaging.ingress.status_code": 400,
-    });
-  } finally {
-    if (previous === undefined) delete process.env.META_APP_SECRET;
-    else process.env.META_APP_SECRET = previous;
-  }
+  // ARCH-043: webhook credentials come from the platform configuration reader.
+  // The obsolete META_APP_SECRET environment variable is no longer consulted.
+  const credentials = createMetaCredentialsReader();
+  const response = await action(
+    { request: signedRequest('{"entry":[null]}') },
+    undefined,
+    credentials.reader,
+  );
+  assert.equal(credentials.reads, 1);
+  assert.equal(response.status, 400);
+  assert.equal(await response.text(), "Bad Request");
+  assert.deepEqual(observations.at(-1), {
+    "messaging.ingress.outcome": "rejected",
+    "messaging.ingress.reason": "invalid_payload",
+    "messaging.ingress.status_code": 400,
+  });
 });
