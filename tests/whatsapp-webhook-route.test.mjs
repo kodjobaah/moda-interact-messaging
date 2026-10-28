@@ -3,6 +3,9 @@ import { createHmac } from "node:crypto";
 import { test } from "node:test";
 
 import { dispatchWhatsAppWebhook } from "../app/lib/whatsapp/webhook-dispatch.server.ts";
+import { MetaConfigurationFailure } from "../app/lib/platform-configuration/meta-contract.server.ts";
+import { createPgMetaConfigRepository } from "../app/lib/platform-configuration/meta-repository.server.ts";
+import { createMetaWebhookCredentialsReader } from "../app/lib/platform-configuration/meta-reader.server.ts";
 import { action } from "../app/routes/whatsapp.tsx";
 import { createMetaCredentialsReader, META_CREDENTIALS } from "./helpers/meta-credentials.mjs";
 
@@ -99,6 +102,45 @@ test("bad signatures, invalid JSON and wrong methods never invoke dispatcher", a
     assert.equal(wrongMethod.headers.get("allow"), "POST");
     assert.equal(dispatchCalls, 0);
   });
+});
+
+test("normalizes a PostgreSQL statement timeout and returns 503 without dispatch", async () => {
+  const timeout = Object.assign(new Error("canceling statement due to statement timeout"), {
+    code: "57014",
+  });
+  const repository = createPgMetaConfigRepository({
+    async query() {
+      throw timeout;
+    },
+  });
+
+  await assert.rejects(repository.readMeta("test"), (error) => {
+    assert.ok(error instanceof MetaConfigurationFailure);
+    assert.equal(error.code, "DB_UNAVAILABLE");
+    assert.equal(error.message, "Meta webhook configuration is unavailable.");
+    return true;
+  });
+
+  const reader = createMetaWebhookCredentialsReader({
+    repository,
+    environment: "test",
+    unsealKeyring() {
+      throw new Error("keyring must not be read after a database timeout");
+    },
+  });
+  let dispatchCalls = 0;
+  const response = await action(
+    { request: requestWithBody('{"entry":[]}') },
+    async () => {
+      dispatchCalls += 1;
+      return "accepted";
+    },
+    reader,
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), "Service Unavailable");
+  assert.equal(dispatchCalls, 0);
 });
 
 test("a late invalid inbound returns 400 without partial publication", async () => {
