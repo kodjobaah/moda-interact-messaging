@@ -13,10 +13,11 @@ export const WHATSAPP_INGRESS_REASONS = [
   "invalid_signature",
   "invalid_json",
   "invalid_payload",
+  "configuration_unavailable",
   "processing_error",
 ] as const;
 
-export const WHATSAPP_INGRESS_STATUS_CODES = [200, 400, 401, 405, 500] as const;
+export const WHATSAPP_INGRESS_STATUS_CODES = [200, 400, 401, 405, 500, 503] as const;
 
 export const WHATSAPP_INGRESS_ATTRIBUTE_KEYS = [
   "messaging.ingress.outcome",

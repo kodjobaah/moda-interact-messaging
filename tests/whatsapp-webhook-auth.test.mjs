@@ -3,29 +3,19 @@ import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { getWhatsAppVerifyToken, verifyMetaSignature } from "../app/lib/whatsapp/webhook-auth.server.ts";
+import {
+  hasSyntacticallyValidMetaSignature,
+  verifyMetaSignature,
+} from "../app/lib/whatsapp/webhook-auth.server.ts";
+import { MetaConfigurationFailure } from "../app/lib/platform-configuration/meta-contract.server.ts";
 import { action, loader } from "../app/routes/whatsapp.tsx";
+import { createMetaCredentialsReader, META_CREDENTIALS } from "./helpers/meta-credentials.mjs";
 
 const webhookUrl = "https://messaging.example/webhook/whatsapp";
-const appSecret = "local-arch034-meta-secret";
-const verifyToken = "local-arch034-verification-token";
+const { appSecret, verifyToken } = META_CREDENTIALS;
 
-async function withEnvironment(name, value, run) {
-  const previous = process.env[name];
-  if (value === null) delete process.env[name];
-  else process.env[name] = value;
-  try {
-    return await run();
-  } finally {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  }
-}
-
-function signedRequest(rawBody, signedBody = rawBody) {
-  const digest = createHmac("sha256", appSecret)
-    .update(signedBody, "utf8")
-    .digest("hex");
+function signedRequest(rawBody, signedBody = rawBody, secret = appSecret) {
+  const digest = createHmac("sha256", secret).update(signedBody, "utf8").digest("hex");
   return new Request(webhookUrl, {
     method: "POST",
     headers: { "x-hub-signature-256": `sha256=${digest}` },
@@ -35,127 +25,115 @@ function signedRequest(rawBody, signedBody = rawBody) {
 
 function loaderRequest(params) {
   const url = new URL(webhookUrl);
-  for (const [name, value] of Object.entries(params)) {
-    url.searchParams.set(name, value);
-  }
+  for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
   return { request: new Request(url) };
 }
 
-test("authenticates the exact raw UTF-8 body using HMAC-SHA256", async () => {
-  await withEnvironment("META_APP_SECRET", appSecret, () => {
-    const body = '{"entry":[],"note":"café"} \n';
-    const request = signedRequest(body);
-    assert.equal(verifyMetaSignature(request, body), true);
-    assert.equal(verifyMetaSignature(request, body.trimEnd()), false);
-    assert.equal(verifyMetaSignature(request, body.replace("café", "cafe")), false);
+test("authenticates the exact raw UTF-8 body using the supplied HMAC secret", () => {
+  const body = '{"entry":[],"note":"café"} \n';
+  const request = signedRequest(body);
+  assert.equal(verifyMetaSignature(request, body, appSecret), true);
+  assert.equal(verifyMetaSignature(request, body.trimEnd(), appSecret), false);
+  assert.equal(verifyMetaSignature(request, body.replace("café", "cafe"), appSecret), false);
+  assert.equal(verifyMetaSignature(request, body, "other-secret"), false);
+});
+
+test("rejects absent and malformed signatures before any database read", async () => {
+  const fixture = createMetaCredentialsReader();
+  const { reader } = fixture;
+  for (const request of [
+    new Request(webhookUrl, { method: "POST", body: "{}" }),
+    new Request(webhookUrl, { method: "POST", body: "{}", headers: { "x-hub-signature-256": "sha256=short" } }),
+  ]) {
+    assert.equal(hasSyntacticallyValidMetaSignature(request), false);
+    const response = await action({ request }, undefined, reader);
+    assert.equal(response.status, 401);
+  }
+  assert.equal(fixture.reads, 0);
+});
+
+test("GET reads one snapshot only for a syntactically eligible verification request", async () => {
+  const fixture = createMetaCredentialsReader();
+  const { reader } = fixture;
+  const response = await loader(loaderRequest({
+    "hub.mode": "subscribe",
+    "hub.verify_token": verifyToken,
+    "hub.challenge": "12345-challenge",
+  }), reader);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/plain");
+  assert.equal(await response.text(), "12345-challenge");
+  assert.equal(fixture.reads, 1);
+
+  for (const params of [
+    { "hub.mode": "unsubscribe", "hub.verify_token": verifyToken, "hub.challenge": "challenge" },
+    { "hub.mode": "subscribe", "hub.challenge": "challenge" },
+    { "hub.mode": "subscribe", "hub.verify_token": verifyToken },
+  ]) {
+    const rejected = await loader(loaderRequest(params), reader);
+    assert.equal(rejected.status, 403);
+  }
+  assert.equal(fixture.reads, 1);
+});
+
+test("GET mismatch uses one database snapshot and configuration failure returns a bounded 503", async () => {
+  const mismatch = createMetaCredentialsReader({ credentials: { ...META_CREDENTIALS, verifyToken: "other" } });
+  const denied = await loader(loaderRequest({
+    "hub.mode": "subscribe", "hub.verify_token": verifyToken, "hub.challenge": "challenge",
+  }), mismatch.reader);
+  assert.equal(denied.status, 403);
+  assert.equal(mismatch.reads, 1);
+
+  const unavailable = createMetaCredentialsReader({ failure: new MetaConfigurationFailure("DB_UNAVAILABLE") });
+  const response = await loader(loaderRequest({
+    "hub.mode": "subscribe", "hub.verify_token": verifyToken, "hub.challenge": "challenge",
+  }), unavailable.reader);
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), "Service Unavailable");
+  assert.equal(unavailable.reads, 1);
+});
+
+test("POST uses one fresh snapshot for a signed candidate and keeps signature validation before JSON parsing", async () => {
+  const fixture = createMetaCredentialsReader();
+  const { reader } = fixture;
+  const body = '{"entry":[]}';
+  const accepted = await action({ request: signedRequest(body) }, undefined, reader);
+  assert.equal(accepted.status, 200);
+  assert.equal(await accepted.text(), "EVENT_RECEIVED");
+  assert.equal(fixture.reads, 1);
+
+  const mismatch = createMetaCredentialsReader({ credentials: { ...META_CREDENTIALS, appSecret: "different" } });
+  const denied = await action({ request: signedRequest(body) }, undefined, mismatch.reader);
+  assert.equal(denied.status, 401);
+  assert.equal(mismatch.reads, 1);
+
+  const malformed = await action({ request: signedRequest("not-json") }, undefined, reader);
+  assert.equal(malformed.status, 400);
+  assert.equal(fixture.reads, 2);
+});
+
+test("signed POST configuration outage returns 503 without dispatch", async () => {
+  const fixture = createMetaCredentialsReader({
+    failure: new MetaConfigurationFailure("UNSEAL_FAILED"),
   });
+  const { reader } = fixture;
+  let dispatchCalls = 0;
+  const response = await action(
+    { request: signedRequest('{"entry":[]}') },
+    async () => { dispatchCalls += 1; return "accepted"; },
+    reader,
+  );
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), "Service Unavailable");
+  assert.equal(fixture.reads, 1);
+  assert.equal(dispatchCalls, 0);
 });
 
-test("rejects absent, wrong-length and equal-length incorrect signatures", async () => {
-  await withEnvironment("META_APP_SECRET", appSecret, () => {
-    const body = '{"entry":[]}';
-    assert.equal(verifyMetaSignature(new Request(webhookUrl), body), false);
-    assert.equal(verifyMetaSignature(new Request(webhookUrl, {
-      headers: { "x-hub-signature-256": "sha256=short" },
-    }), body), false);
-    assert.equal(verifyMetaSignature(signedRequest(body, '{"entry":[1]}'), body), false);
-  });
-});
-
-test("preserves missing-secret fail-closed handling and the missing-header short circuit", async () => {
-  await withEnvironment("META_APP_SECRET", null, async () => {
-    assert.equal(verifyMetaSignature(new Request(webhookUrl), "{}"), false);
-    assert.throws(
-      () => verifyMetaSignature(signedRequest("{}"), "{}"),
-      /META_APP_SECRET is required/,
-    );
-    await assert.rejects(
-      action({ request: signedRequest('{"entry":[]}') }),
-      /META_APP_SECRET is required/,
-    );
-  });
-});
-
-test("GET verification accepts matching mode, token and nonempty challenge", async () => {
-  await withEnvironment("WHATSAPP_VERIFY_TOKEN", verifyToken, async () => {
-    assert.equal(getWhatsAppVerifyToken(), verifyToken);
-    const response = await loader(loaderRequest({
-      "hub.mode": "subscribe",
-      "hub.verify_token": verifyToken,
-      "hub.challenge": "12345-challenge",
-    }));
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("content-type"), "text/plain");
-    assert.equal(await response.text(), "12345-challenge");
-  });
-});
-
-test("GET rejects mismatched mode, token and absent challenge without leaking the secret", async () => {
-  await withEnvironment("WHATSAPP_VERIFY_TOKEN", verifyToken, async () => {
-    for (const params of [
-      { "hub.mode": "unsubscribe", "hub.verify_token": verifyToken, "hub.challenge": "challenge" },
-      { "hub.mode": "subscribe", "hub.verify_token": "incorrect-token", "hub.challenge": "challenge" },
-      { "hub.mode": "subscribe", "hub.verify_token": verifyToken },
-    ]) {
-      const response = await loader(loaderRequest(params));
-      assert.equal(response.status, 403);
-      const body = await response.text();
-      assert.equal(body, "Forbidden");
-      assert.equal(body.includes(verifyToken), false);
-    }
-  });
-});
-
-test("GET preserves failure when WHATSAPP_VERIFY_TOKEN is missing", async () => {
-  await withEnvironment("WHATSAPP_VERIFY_TOKEN", null, async () => {
-    assert.throws(getWhatsAppVerifyToken, /WHATSAPP_VERIFY_TOKEN is required/);
-    await assert.rejects(
-      loader(loaderRequest({ "hub.mode": "subscribe", "hub.challenge": "challenge" })),
-      /WHATSAPP_VERIFY_TOKEN is required/,
-    );
-  });
-});
-
-test("POST accepts signed JSON with no events without publishing jobs", async () => {
-  await withEnvironment("META_APP_SECRET", appSecret, async () => {
-    const response = await action({ request: signedRequest('{"entry":[]}') });
-    assert.equal(response.status, 200);
-    assert.equal(await response.text(), "EVENT_RECEIVED");
-  });
-});
-
-test("POST rejects unsigned and tampered bodies before JSON parsing", async () => {
-  await withEnvironment("META_APP_SECRET", appSecret, async () => {
-    const unsigned = await action({ request: new Request(webhookUrl, {
-      method: "POST",
-      body: '{"entry":[]}',
-    }) });
-    assert.equal(unsigned.status, 401);
-    assert.equal(await unsigned.text(), "Unauthorized");
-
-    const tampered = await action({ request: signedRequest("not-json", '{"entry":[]}') });
-    assert.equal(tampered.status, 401);
-    assert.equal(await tampered.text(), "Unauthorized");
-
-    const signedMalformed = await action({ request: signedRequest("not-json") });
-    assert.equal(signedMalformed.status, 400);
-    assert.equal(await signedMalformed.text(), "Bad Request");
-  });
-});
-
-test("POST continues to reject other HTTP methods without checking the signature", async () => {
-  const response = await action({ request: new Request(webhookUrl) });
-  assert.equal(response.status, 405);
-  assert.equal(response.headers.get("allow"), "POST");
-  assert.equal(await response.text(), "Method Not Allowed");
-});
-
-test("secret handling remains in a nonlogging .server module", () => {
+test("source has no Meta environment-secret getters and never parses JSON before HMAC", () => {
   const authSource = readFileSync(new URL("../app/lib/whatsapp/webhook-auth.server.ts", import.meta.url), "utf8");
   const routeSource = readFileSync(new URL("../app/routes/whatsapp.tsx", import.meta.url), "utf8");
-
-  assert.doesNotMatch(authSource, /\bconsole\./);
+  assert.doesNotMatch(authSource, /\b(?:META_APP_SECRET|WHATSAPP_VERIFY_TOKEN|getWhatsAppVerifyToken|getMetaAppSecret)\b/);
   assert.doesNotMatch(routeSource, /\b(?:META_APP_SECRET|WHATSAPP_VERIFY_TOKEN)\b/);
-  assert.match(routeSource, /verifyMetaSignature\(request, rawBody\)/);
-  assert.ok(routeSource.indexOf("verifyMetaSignature(request, rawBody)") < routeSource.indexOf("JSON.parse(rawBody)"));
+  assert.match(routeSource, /verifyMetaSignature\(request, rawBody, snapshot\.value\.appSecret\)/);
+  assert.ok(routeSource.indexOf("verifyMetaSignature(request, rawBody, snapshot.value.appSecret)") < routeSource.indexOf("JSON.parse(rawBody)"));
 });

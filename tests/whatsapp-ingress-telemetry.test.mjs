@@ -109,11 +109,29 @@ test("uses only closed metric outcome and reason vocabularies", () => {
     "invalid_signature",
     "invalid_json",
     "invalid_payload",
+    "configuration_unavailable",
     "processing_error",
   ]);
   assert.deepEqual(telemetry.WHATSAPP_INGRESS_STATUS_CODES, [
-    200, 400, 401, 405, 500,
+    200, 400, 401, 405, 500, 503,
   ]);
+});
+
+test("records configuration outage as one bounded failed 503 observation", () => {
+  telemetry.recordWhatsAppIngressTelemetry({
+    outcome: "failed",
+    reason: "configuration_unavailable",
+    statusCode: 503,
+    durationMs: 7,
+  });
+  assert.deepEqual(spans.at(-1).attributes, {
+    "messaging.ingress.outcome": "failed",
+    "messaging.ingress.reason": "configuration_unavailable",
+    "messaging.ingress.status_code": 503,
+  });
+  assert.equal(spans.at(-1).status.message, "messaging_ingress_configuration_unavailable");
+  assert.deepEqual(counters.at(-1).attributes, spans.at(-1).attributes);
+  assert.deepEqual(histograms.at(-1).attributes, spans.at(-1).attributes);
 });
 
 test("records rejected and failed ingress outcomes as errors", () => {

@@ -204,12 +204,39 @@ Typical values include:
 ```bash
 REDIS_URL=
 
-# WhatsApp / Meta configuration
-WHATSAPP_VERIFY_TOKEN=
-WHATSAPP_APP_SECRET=
+# PostgreSQL-backed Meta webhook configuration
+DATABASE_URL=
+DEPLOYMENT_ENVIRONMENT_NAME=local
+MODA_CONFIG_UNSEAL_KEY='{"config-key-1":"<canonical-base64-32-byte-key>"}'
+MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID=config-key-1
+
+# WhatsApp outbound sender credentials are owned separately by Background.
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
 ```
+
+Meta webhook verification credentials are read afresh for each eligible request
+from the sealed `test|local|development|staging|production` row with key
+`messaging.meta` in `public."PlatformConfiguration"`. The service requires an
+explicit `DEPLOYMENT_ENVIRONMENT_NAME`; it never selects an environment from
+`NODE_ENV`, accepts a key/environment from webhook input, caches plaintext
+credentials, or falls back to `META_APP_SECRET` / `WHATSAPP_VERIFY_TOKEN`.
+
+`MODA_CONFIG_UNSEAL_KEY` is an independent JSON keyring used only to unseal
+platform configuration. Keep it and `MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID` outside
+the database and provide them through the deployment secret manager. The
+Messaging database account should have read-only access to the required
+configuration row/table where the deployment platform permits that restriction.
+If the row, database, or unseal material is unavailable, eligible webhook
+verification/authentication fails closed with `503 Service Unavailable`; health
+and Redis readiness checks do not make database requests.
+
+The current Render test service does not yet provide `DATABASE_URL`, independent
+unseal material, or `DEPLOYMENT_ENVIRONMENT_NAME=test`. An operator must provision
+those values securely and verify the sealed test row before the deployed webhook
+cutover. Removing the legacy `META_APP_SECRET` and `WHATSAPP_VERIFY_TOKEN`
+deployment group is a separate rollout step after that verification; retaining
+it during transition does not make Messaging read it.
 
 ### Run locally
 
