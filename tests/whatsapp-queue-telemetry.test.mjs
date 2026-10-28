@@ -11,9 +11,11 @@ import {
 } from "@opentelemetry/sdk-trace-node";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { Worker } from "bullmq";
+import { createMetaCredentialsReader, META_CREDENTIALS } from "./helpers/meta-credentials.mjs";
 
 const redisUrl = process.env.TEST_REDIS_URL;
-const appSecret = "messaging-queue-telemetry-secret";
+const appSecret = META_CREDENTIALS.appSecret;
+const metaReader = createMetaCredentialsReader().reader;
 const workers = [];
 
 test("uses one shared adapter through the native Queue telemetry option", () => {
@@ -39,7 +41,6 @@ after(async () => {
     await getRedis().quit();
   }
 
-  delete process.env.META_APP_SECRET;
   delete process.env.REDIS_URL;
   trace.disable();
   context.disable();
@@ -64,7 +65,6 @@ test(
     const contextManager = new AsyncHooksContextManager().enable();
     context.setGlobalContextManager(contextManager);
 
-    process.env.META_APP_SECRET = appSecret;
     process.env.REDIS_URL = redisUrl;
 
     const { action } = await import("../app/routes/whatsapp.tsx");
@@ -94,7 +94,7 @@ test(
           request: createSignedRequest(firstPayload),
           params: {},
           context: {},
-        });
+        }, undefined, metaReader);
         await firstProcessed;
         span.end();
       });
@@ -140,7 +140,7 @@ test(
       request: createSignedRequest(secondPayload),
       params: {},
       context: {},
-    });
+    }, undefined, metaReader);
 
     assert.equal(secondResponse.status, 200);
     assert.deepEqual(await secondProcessed, expectedEvent(secondPayload));

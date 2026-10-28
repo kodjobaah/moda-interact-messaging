@@ -1,24 +1,18 @@
 import crypto from "node:crypto";
 
 // Server-only Meta authentication. Keep HTTP responses and request handling in the route.
-export function getWhatsAppVerifyToken(): string {
-  const token = process.env.WHATSAPP_VERIFY_TOKEN;
-
-  if (!token) {
-    throw new Error("WHATSAPP_VERIFY_TOKEN is required");
-  }
-
-  return token;
+export function hasSyntacticallyValidMetaSignature(request: Request): boolean {
+  const signature = request.headers.get("x-hub-signature-256");
+  return typeof signature === "string" && /^sha256=[a-f0-9]{64}$/.test(signature);
 }
 
-export function verifyMetaSignature(request: Request, rawBody: string): boolean {
+export function verifyMetaSignature(
+  request: Request,
+  rawBody: string,
+  appSecret: string,
+): boolean {
   const signature = request.headers.get("x-hub-signature-256");
-
-  if (!signature) {
-    return false;
-  }
-
-  const appSecret = getMetaAppSecret();
+  if (!hasSyntacticallyValidMetaSignature(request) || !signature) return false;
 
   const expectedSignature =
     "sha256=" +
@@ -35,14 +29,4 @@ export function verifyMetaSignature(request: Request, rawBody: string): boolean 
   }
 
   return crypto.timingSafeEqual(received, expected);
-}
-
-function getMetaAppSecret(): string {
-  const secret = process.env.META_APP_SECRET;
-
-  if (!secret) {
-    throw new Error("META_APP_SECRET is required");
-  }
-
-  return secret;
 }
