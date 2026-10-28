@@ -103,11 +103,11 @@ test("silently skips malformed statuses and ignores unrelated changes", async ()
   assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "accepted");
   assert.deepEqual(observed.map(({ event }) => event.providerMessageId), ["out-valid"]);
   assert.equal(await dispatchWhatsAppWebhook({ entry: [] }, publishers), "accepted");
-  assert.equal(await dispatchWhatsAppWebhook({}, publishers), "accepted");
+  assert.equal(await dispatchWhatsAppWebhook({ entry: [{ changes: null }] }, publishers), "accepted");
   assert.equal(observed.length, 1);
 });
 
-test("retains partial publication on a late invalid inbound message (MESSAGING-005 follow-up)", async () => {
+test("rejects a late invalid inbound without publishing earlier valid events", async () => {
   const { observed, publishers } = fakePublishers();
   const payload = {
     entry: [{
@@ -120,7 +120,7 @@ test("retains partial publication on a late invalid inbound message (MESSAGING-0
   };
 
   assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "invalid_payload");
-  assert.deepEqual(observed.map(({ event }) => event.providerMessageId), ["in-1", "out-1"]);
+  assert.deepEqual(observed, []);
 });
 
 test("propagates publisher errors and never advances past a failed job", async () => {
@@ -143,9 +143,73 @@ test("propagates publisher errors and never advances past a failed job", async (
   assert.deepEqual(observed, ["in-1"]);
 });
 
-test("retains historical errors on non-array/invalid envelope shapes for MESSAGING-005", async () => {
-  const { publishers } = fakePublishers();
-  await assert.rejects(dispatchWhatsAppWebhook({ entry: 42 }, publishers), TypeError);
-  await assert.rejects(dispatchWhatsAppWebhook(null, publishers), TypeError);
-  await assert.rejects(dispatchWhatsAppWebhook({ entry: [{ changes: [{ field: "messages", value: null }] }] }, publishers), TypeError);
+test("rejects malformed envelopes as invalid_payload without calling publishers", async () => {
+  const { observed, publishers } = fakePublishers();
+  for (const payload of [
+    null,
+    [],
+    {},
+    { entry: 42 },
+    { entry: [null] },
+    { entry: [{ changes: {} }] },
+    { entry: [{ changes: [null] }] },
+    { entry: [{ changes: [{ field: "messages", value: null }] }] },
+    { entry: [{ changes: [messagesChange("not-an-array")] }] },
+    { entry: [{ changes: [messagesChange([], {})] }] },
+  ]) {
+    assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "invalid_payload");
+  }
+  assert.deepEqual(observed, []);
+});
+
+test("preflights statuses and all inbound messages before publishing any jobs", async () => {
+  const { observed, publishers } = fakePublishers();
+  const payload = {
+    entry: [{
+      id: "waba-1",
+      changes: [
+        messagesChange([], [providerStatus("out-1", "delivered")]),
+        messagesChange([textMessage("in-1"), textMessage("in-2", "")]),
+      ],
+    }],
+  };
+
+  assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "invalid_payload");
+  assert.deepEqual(observed, []);
+});
+
+test("publisher failure after successful preflight can still leave earlier jobs published", async () => {
+  const seen = [];
+  const failure = new Error("queue unavailable after first accepted job");
+  const publishers = {
+    async enqueueInboundMessage(event) {
+      seen.push(event.providerMessageId);
+    },
+    async enqueueProviderStatus(event) {
+      seen.push(event.providerMessageId);
+      throw failure;
+    },
+  };
+  const payload = {
+    entry: [{ id: "waba-1", changes: [messagesChange(
+      [textMessage("in-1")],
+      [providerStatus("out-1", "sent"), providerStatus("out-2", "read")],
+    )] }],
+  };
+
+  await assert.rejects(dispatchWhatsAppWebhook(payload, publishers), (error) => error === failure);
+  assert.deepEqual(seen, ["in-1", "out-1"]);
+});
+
+test("a malformed later change rejects the entire otherwise-valid batch before publishing", async () => {
+  const { observed, publishers } = fakePublishers();
+  const payload = {
+    entry: [
+      { id: "waba-1", changes: [messagesChange([textMessage("in-1")])] },
+      { id: "waba-2", changes: [{ field: "messages", value: { messages: "invalid" } }] },
+    ],
+  };
+
+  assert.equal(await dispatchWhatsAppWebhook(payload, publishers), "invalid_payload");
+  assert.deepEqual(observed, []);
 });

@@ -80,7 +80,7 @@ export async function action(
       );
     }
 
-    let payload: any;
+    let payload: unknown;
 
     try {
       payload = JSON.parse(rawBody);

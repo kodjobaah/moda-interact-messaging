@@ -107,7 +107,7 @@ test("bad signatures, invalid JSON and wrong methods never invoke dispatcher", a
   });
 });
 
-test("a late invalid inbound returns 400 even after earlier successful publication", async () => {
+test("a late invalid inbound returns 400 without any publication", async () => {
   await withSecret(async () => {
     const payload = mixedWebhook();
     payload.entry[0].changes.push({
@@ -126,7 +126,7 @@ test("a late invalid inbound returns 400 even after earlier successful publicati
 
     assert.equal(response.status, 400);
     assert.equal(await response.text(), "Bad Request");
-    assert.deepEqual(seen, ["in-1", "out-1"]);
+    assert.deepEqual(seen, []);
   });
 });
 
@@ -140,11 +140,52 @@ test("publisher errors still propagate through the HTTP failure boundary", async
   });
 });
 
-test("malformed signed JSON envelopes retain pre-MESSAGING-005 exception behaviour", async () => {
+test("malformed signed JSON envelopes return controlled 400", async () => {
   await withSecret(async () => {
-    await assert.rejects(
-      action({ request: requestWithBody("null") }, dispatchWhatsAppWebhook),
-      TypeError,
+    for (const body of ["null", "[]", "{}", '{"entry":null}', '{"entry":[{"changes":[{"field":"messages","value":null}]}]}']) {
+      const response = await action(
+        { request: requestWithBody(body) },
+        dispatchWhatsAppWebhook,
+      );
+      assert.equal(response.status, 400, body);
+      assert.equal(await response.text(), "Bad Request", body);
+    }
+  });
+});
+
+test("signed malformed change after valid events returns 400 without publication", async () => {
+  await withSecret(async () => {
+    const payload = mixedWebhook();
+    payload.entry[0].changes.push({ field: "messages", value: { statuses: "not-array" } });
+    const observed = [];
+    const publisher = {
+      async enqueueInboundMessage(event) { observed.push(event.providerMessageId); },
+      async enqueueProviderStatus(event) { observed.push(event.providerMessageId); },
+    };
+    const response = await action(
+      { request: requestWithBody(JSON.stringify(payload)) },
+      (parsed) => dispatchWhatsAppWebhook(parsed, publisher),
     );
+
+    assert.equal(response.status, 400);
+    assert.equal(await response.text(), "Bad Request");
+    assert.deepEqual(observed, []);
+  });
+});
+
+test("signed batches containing invalid individual statuses still return 200", async () => {
+  await withSecret(async () => {
+    const payload = mixedWebhook();
+    const seen = [];
+    const publisher = {
+      async enqueueInboundMessage(event) { seen.push(event.providerMessageId); },
+      async enqueueProviderStatus(event) { seen.push(event.providerMessageId); },
+    };
+    const response = await action(
+      { request: requestWithBody(JSON.stringify(payload)) },
+      (parsed) => dispatchWhatsAppWebhook(parsed, publisher),
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(seen, ["in-1", "out-1"]);
   });
 });
