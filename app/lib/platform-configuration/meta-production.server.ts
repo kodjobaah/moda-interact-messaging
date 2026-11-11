@@ -51,17 +51,20 @@ function createProductionReader(): MetaWebhookCredentialsReader {
   return createMetaWebhookCredentialsReader({
     repository,
     environment,
-    unsealKeyring: () => {
-      try {
-        const keyring = parseCredentialKeyring(process.env.MODA_CONFIG_UNSEAL_KEY);
-        resolveActiveCredentialKey(keyring, process.env.MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID);
-        return keyring;
-      } catch {
-        throw new MetaConfigurationFailure("UNSEAL_FAILED");
-      }
-    },
+    unsealKeyring: () => loadDeploymentEncryptionKeyring(),
     logger: appLogger,
   });
+}
+
+/** Read only the unified deployment pair; persisted envelopes select historical keys. */
+export function loadDeploymentEncryptionKeyring(environment: Readonly<NodeJS.ProcessEnv> = process.env) {
+  try {
+    const keyring = parseCredentialKeyring(environment.MODA_ENCRYPTION_KEYS_JSON);
+    resolveActiveCredentialKey(keyring, environment.MODA_ENCRYPTION_ACTIVE_KEY_ID);
+    return keyring;
+  } catch {
+    throw new MetaConfigurationFailure("UNSEAL_FAILED");
+  }
 }
 
 function getPool(databaseUrl: string, appLogger: StructuredLogger): Pool {

@@ -207,8 +207,8 @@ REDIS_URL=
 # PostgreSQL-backed Meta webhook configuration
 DATABASE_URL=
 DEPLOYMENT_ENVIRONMENT_NAME=local
-MODA_CONFIG_UNSEAL_KEY='{"config-key-1":"<canonical-base64-32-byte-key>"}'
-MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID=config-key-1
+MODA_ENCRYPTION_KEYS_JSON='{"config-key-1":"<canonical-base64-32-byte-key>"}'
+MODA_ENCRYPTION_ACTIVE_KEY_ID=config-key-1
 
 # WhatsApp outbound sender credentials are owned separately by Background.
 WHATSAPP_ACCESS_TOKEN=
@@ -222,8 +222,8 @@ explicit `DEPLOYMENT_ENVIRONMENT_NAME`; it never selects an environment from
 `NODE_ENV`, accepts a key/environment from webhook input, caches plaintext
 credentials, or falls back to `META_APP_SECRET` / `WHATSAPP_VERIFY_TOKEN`.
 
-`MODA_CONFIG_UNSEAL_KEY` is an independent JSON keyring used only to unseal
-platform configuration. Keep it and `MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID` outside
+`MODA_ENCRYPTION_KEYS_JSON` is the unified deployment JSON keyring used across
+applications. Messaging uses it to decrypt platform configuration. Keep it and `MODA_ENCRYPTION_ACTIVE_KEY_ID` outside
 the database and provide them through the deployment secret manager. The
 Messaging database account should have read-only access to the required
 configuration row/table where the deployment platform permits that restriction.
@@ -367,3 +367,5 @@ The service should remain an ingress/egress boundary rather than becoming a seco
 ## License
 
 This project is currently maintained as part of the Moda Interact product-development work. Add an explicit license before distributing it as open source or accepting external contributions.
+
+When migrating encryption configuration, preserve all historical wrapping and commerce keys under their original IDs in the unified map. `MODA_ENCRYPTION_ACTIVE_KEY_ID` selects the key for new writes; stored ciphertext identifies its own decryption key. Do not regenerate key material or rewrite authenticated data as part of renaming these settings.
