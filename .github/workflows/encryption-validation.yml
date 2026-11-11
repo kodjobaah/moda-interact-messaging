@@ -1,0 +1,64 @@
+name: Isolated Messaging encryption validation
+on:
+  push:
+    branches: [codex/unified-encryption-validation]
+permissions:
+  contents: read
+concurrency:
+  group: messaging-encryption-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  disposable-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: messaging_test
+          POSTGRES_PASSWORD: disposable_only
+          POSTGRES_DB: moda_messaging_disposable_encryption
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U messaging_test -d moda_messaging_disposable_encryption"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NODE_ENV: test
+      NODE_OPTIONS: --max-old-space-size=4096
+      MODA_DISPOSABLE_INTEGRATION: '1'
+      DATABASE_URL: postgresql://messaging_test:disposable_only@127.0.0.1:5432/moda_messaging_disposable_encryption
+      TEST_DATABASE_URL: postgresql://messaging_test:disposable_only@127.0.0.1:5432/moda_messaging_disposable_encryption
+      REDIS_URL: redis://127.0.0.1:6379
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check out pinned public database schema
+        uses: actions/checkout@v5
+        with:
+          repository: kodjobaah/moda-interact-database
+          ref: 5329d5390d346042895219663f3a040ea54ae168
+          path: database
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Migrate empty disposable database without seeds
+        run: npx --yes prisma@6.19.3 migrate deploy --schema database/prisma/schema.prisma
+      - name: Exercise PostgreSQL and both Redis integration gates
+        run: >-
+          node --import tsx --test --test-concurrency=1
+          tests/platform-configuration-meta-postgres.test.mjs
+          tests/whatsapp-queue-telemetry.test.mjs
+          tests/whatsapp-template-status-queue.test.mjs
